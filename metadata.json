@@ -1,0 +1,6 @@
+{
+  "name": "MediSnap",
+  "description": "Gestionnaire moderne et intuitif de médicaments, rappels intelligents, suivi d'observance et synchronisation cloud chiffrée de bout en bout.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

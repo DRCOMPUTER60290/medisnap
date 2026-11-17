@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">MediSnap</string>
+    <string name="biometric_prompt_title">Accès Sécurisé MediSnap</string>
+    <string name="biometric_prompt_subtitle">Authentifiez-vous pour accéder à vos données médicales</string>
+    <string name="biometric_action_subtitle">Confirmez votre identité pour effectuer cette action sensible</string>
+    <string name="biometric_lock_heading">Dossier Médical Protégé</string>
+    <string name="biometric_lock_description">Vos traitements, posologies et rapports d’observance sont protégés par l’authentification biométrique de votre appareil.</string>
+    <string name="biometric_unlock_cta">Déverrouiller l’accès</string>
+</resources>
