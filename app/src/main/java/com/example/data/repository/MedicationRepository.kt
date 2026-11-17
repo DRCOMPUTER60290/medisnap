@@ -1,5 +1,7 @@
 package com.example.data.repository
 
+import androidx.room.withTransaction
+import com.example.data.local.AppDatabase
 import com.example.data.local.MedicationDao
 import com.example.data.local.MedicationLogDao
 import com.example.data.model.Medication
@@ -9,7 +11,8 @@ import java.util.Calendar
 
 class MedicationRepository(
     private val medicationDao: MedicationDao,
-    private val medicationLogDao: MedicationLogDao
+    private val medicationLogDao: MedicationLogDao,
+    private val database: AppDatabase? = null
 ) {
     val allActiveMedications: Flow<List<Medication>> = medicationDao.getAllActiveMedications()
     val allLogs: Flow<List<MedicationLog>> = medicationLogDao.getAllLogs()
@@ -111,9 +114,48 @@ class MedicationRepository(
     suspend fun getAllMedicationsForBackup(): List<Medication> = medicationDao.getAllActiveList()
     suspend fun getAllLogsForBackup(): List<MedicationLog> = medicationLogDao.getAllLogsList()
 
-    suspend fun restoreData(meds: List<Medication>, logs: List<MedicationLog>) {
-        meds.forEach { medicationDao.insertMedication(it) }
-        medicationLogDao.insertLogs(logs)
+    suspend fun restoreData(
+        meds: List<Medication>,
+        logs: List<MedicationLog>,
+        replaceExisting: Boolean = false
+    ) {
+        val executeRestore: suspend () -> Unit = {
+            if (replaceExisting) {
+                medicationLogDao.deleteAllLogs()
+                medicationDao.deleteAllMedications()
+                meds.forEach { medicationDao.insertMedication(it) }
+                medicationLogDao.insertLogs(logs)
+            } else {
+                val idMapping = mutableMapOf<Int, Int>()
+                meds.forEach { med ->
+                    val newId = medicationDao.insertMedication(med.copy(id = 0)).toInt()
+                    idMapping[med.id] = newId
+                }
+                val remappedLogs = logs.map { log ->
+                    val mappedMedId = idMapping[log.medicationId] ?: log.medicationId
+                    log.copy(id = 0, medicationId = mappedMedId)
+                }
+                medicationLogDao.insertLogs(remappedLogs)
+            }
+        }
+
+        if (database != null) {
+            database.withTransaction { executeRestore() }
+        } else {
+            executeRestore()
+        }
+    }
+
+    suspend fun eraseAllData() {
+        val executeErase: suspend () -> Unit = {
+            medicationLogDao.deleteAllLogs()
+            medicationDao.deleteAllMedications()
+        }
+        if (database != null) {
+            database.withTransaction { executeErase() }
+        } else {
+            executeErase()
+        }
     }
 
     private fun getTodayEpochDay(): Long {

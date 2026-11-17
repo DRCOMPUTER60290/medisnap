@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.example.R
+import com.example.security.SecurityPreferences
 
 class ReminderNotificationReceiver : BroadcastReceiver() {
 
@@ -16,6 +17,7 @@ class ReminderNotificationReceiver : BroadcastReceiver() {
         val dosage = intent.getStringExtra("DOSAGE") ?: ""
         val instructions = intent.getStringExtra("INSTRUCTIONS") ?: ""
         val logId = intent.getLongExtra("LOG_ID", 0L)
+        val lockEnabled = SecurityPreferences(context).isBiometricLockEnabled
 
         val notificationManager =
             context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -29,6 +31,11 @@ class ReminderNotificationReceiver : BroadcastReceiver() {
             ).apply {
                 description = "Notifications de rappel intelligentes pour vos prises de médicaments"
                 enableVibration(true)
+                lockscreenVisibility = if (lockEnabled) {
+                    NotificationCompat.VISIBILITY_PRIVATE
+                } else {
+                    NotificationCompat.VISIBILITY_PUBLIC
+                }
             }
             notificationManager.createNotificationChannel(channel)
         }
@@ -39,11 +46,22 @@ class ReminderNotificationReceiver : BroadcastReceiver() {
             "C'est l'heure de prendre votre traitement : $dosage"
         }
 
+        val publicNotification = NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle("Rappel santé MediSnap")
+            .setContentText("Vous avez une prise de traitement prévue. Déverrouillez pour consulter.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle("Rappel MediSnap : $medName")
             .setContentText(contentText)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(
+                if (lockEnabled) NotificationCompat.VISIBILITY_PRIVATE else NotificationCompat.VISIBILITY_PUBLIC
+            )
+            .setPublicVersion(publicNotification)
             .setAutoCancel(true)
 
         notificationManager.notify(logId.toInt().coerceAtLeast(1001), builder.build())

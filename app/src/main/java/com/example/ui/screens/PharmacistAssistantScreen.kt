@@ -53,7 +53,8 @@ data class ChatMessage(
     val isUser: Boolean,
     val text: String,
     val bitmap: Bitmap? = null,
-    val timestamp: String = "19:52"
+    val timestamp: String = "19:52",
+    val suggestedResult: com.example.data.api.ScannedMedicationResult? = null
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -118,37 +119,55 @@ fun PharmacistAssistantScreen(
                 promptHint = textToSend
             )
 
-            // Check if user has this medication in stock
-            val matchingMed = medications.find { med ->
-                med.name.lowercase().contains(aiResult.name.lowercase()) ||
-                aiResult.name.lowercase().contains(med.name.lowercase())
+            // Check if user has this medication in stock (only when a valid medication name was extracted)
+            val extractedName = aiResult.name.trim()
+            val matchingMed = if (extractedName.isNotBlank()) {
+                medications.find { med ->
+                    med.name.lowercase().contains(extractedName.lowercase()) ||
+                        extractedName.lowercase().contains(med.name.lowercase())
+                }
+            } else {
+                null
             }
 
-            val replyText = if (matchingMed != null) {
-                """
-                ✅ **DÉJÀ EN STOCK À LA MAISON !**
+            val replyText = when {
+                extractedName.isBlank() -> {
+                    """
+                    ℹ️ **ANALYSE AUTOMATIQUE INDISPONIBLE**
 
-                📌 **Médicament** : ${matchingMed.name} (${matchingMed.dosage})
-                📦 **Stock chez vous** : ${matchingMed.stockQuantity} ${matchingMed.form.lowercase()}s restant(s)
-                💡 **Consignes de prise** : ${matchingMed.instructions}
+                    ${aiResult.rawAiAnalysis}
 
-                💬 *Conseil du Pharmacien* : Vous disposez déjà de ${matchingMed.stockQuantity} unités. Il n'est pas nécessaire de racheter cette boîte sauf renouvellement spécifique de votre ordonnance !
-                """.trimIndent()
-            } else {
-                """
-                ⚠️ **NON DÉTECTÉ DANS VOTRE STOCK**
+                    💡 Astuce : saisissez le nom du médicament (ex. Doliprane, Spasfon, Amoxicilline) ou réessayez avec une photo plus nette.
+                    """.trimIndent()
+                }
+                matchingMed != null -> {
+                    """
+                    ✅ **DÉJÀ EN STOCK À LA MAISON !**
 
-                📌 **Médicament identifié** : ${aiResult.name} (${aiResult.dosage})
-                💊 **Forme** : ${aiResult.form}
-                📋 **Posologie habituelle** : ${aiResult.instructions}
+                    📌 **Médicament** : ${matchingMed.name} (${matchingMed.dosage})
+                    📦 **Stock chez vous** : ${matchingMed.stockQuantity} ${matchingMed.form.lowercase()}s restant(s)
+                    💡 **Consignes de prise** : ${matchingMed.instructions}
 
-                ➕ Vous pouvez l'ajouter directement à votre armoire à pharmacie ci-dessous.
-                """.trimIndent()
+                    💬 *Conseil du Pharmacien* : Vous disposez déjà de ${matchingMed.stockQuantity} unités. Il n'est pas nécessaire de racheter cette boîte sauf renouvellement spécifique de votre ordonnance !
+                    """.trimIndent()
+                }
+                else -> {
+                    """
+                    ⚠️ **NON DÉTECTÉ DANS VOTRE STOCK**
+
+                    📌 **Médicament identifié** : ${aiResult.name} (${aiResult.dosage})
+                    💊 **Forme** : ${aiResult.form}
+                    📋 **Posologie habituelle** : ${aiResult.instructions}
+
+                    ➕ Vous pouvez l'ajouter directement à votre armoire à pharmacie ci-dessous.
+                    """.trimIndent()
+                }
             }
 
             messages = messages + ChatMessage(
                 isUser = false,
-                text = replyText
+                text = replyText,
+                suggestedResult = if (matchingMed == null && extractedName.isNotBlank()) aiResult else null
             )
 
             isThinking = false
@@ -315,8 +334,19 @@ fun PharmacistAssistantScreen(
         ) {
             items(messages, key = { it.id }) { msg ->
                 ChatBubbleItem(msg = msg, onAddSuggested = {
-                    onAddMedication("Nouveau Médicament", "500mg", "Comprimé", "#0F62FE", "1 par jour", "08:00", 20)
-                    Toast.makeText(context, "Médicament ajouté au traitement !", Toast.LENGTH_SHORT).show()
+                    val res = msg.suggestedResult
+                    if (res != null) {
+                        onAddMedication(
+                            res.name,
+                            res.dosage,
+                            res.form,
+                            res.colorHex,
+                            res.instructions,
+                            res.timesOfDay,
+                            res.stockQuantity
+                        )
+                        Toast.makeText(context, "${res.name} ajouté au traitement !", Toast.LENGTH_SHORT).show()
+                    }
                 })
             }
 

@@ -30,6 +30,9 @@ interface MedicationDao {
 
     @Query("UPDATE medications SET stockQuantity = stockQuantity + :amount WHERE id = :id")
     suspend fun addStock(id: Int, amount: Int)
+
+    @Query("DELETE FROM medications")
+    suspend fun deleteAllMedications()
 }
 
 @Dao
@@ -57,4 +60,7 @@ interface MedicationLogDao {
 
     @Query("SELECT * FROM medication_logs WHERE medicationId = :medId AND scheduledDateEpochDay = :epochDay AND timeSlot = :timeSlot LIMIT 1")
     suspend fun findLog(medId: Int, epochDay: Long, timeSlot: String): MedicationLog?
+
+    @Query("DELETE FROM medication_logs")
+    suspend fun deleteAllLogs()
 }

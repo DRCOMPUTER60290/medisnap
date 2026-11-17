@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -16,9 +17,12 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import com.example.data.model.MedicationLog
+import com.example.security.BiometricAuthManager
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -26,9 +30,13 @@ import java.util.Locale
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AdherenceReportScreen(
-    allLogs: List<MedicationLog>
+    allLogs: List<MedicationLog>,
+    requireBiometricForExport: Boolean = true,
+    onSetAuthenticating: (Boolean) -> Unit = {},
+    onExternalPickerLaunched: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val activity = context as? FragmentActivity
     val totalCount = allLogs.size
     val takenCount = allLogs.count { it.status == "TAKEN" }
     val skippedCount = allLogs.count { it.status == "SKIPPED" }
@@ -39,6 +47,29 @@ fun AdherenceReportScreen(
 
     val primaryColor = MaterialTheme.colorScheme.primary
     val trackColor = MaterialTheme.colorScheme.surfaceVariant
+
+    fun launchShareReport() {
+        val reportText = buildString {
+            appendLine("--- Rapport d'Observance Médicale MediSnap ---")
+            appendLine("Date : ${SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE).format(Date())}")
+            appendLine("Taux global d'observance : $adherencePercent %")
+            appendLine("Doses prises : $takenCount")
+            appendLine("Doses manquées/ignorées : $skippedCount")
+            appendLine("\nHistorique récent :")
+            allLogs.take(10).forEach { log ->
+                val statusStr = if (log.status == "TAKEN") "PRIS ✅" else "IGNORÉ ⏭️"
+                appendLine("- ${log.medicationName} (${log.dosage}) - ${log.timeSlot} : $statusStr")
+            }
+        }
+
+        val sendIntent = Intent().apply {
+            action = Intent.ACTION_SEND
+            putExtra(Intent.EXTRA_TEXT, reportText)
+            type = "text/plain"
+        }
+        onExternalPickerLaunched()
+        context.startActivity(Intent.createChooser(sendIntent, "Partager le rapport médical"))
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -53,7 +84,7 @@ fun AdherenceReportScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Observance & Rapports 📊",
                         style = MaterialTheme.typography.headlineMedium,
@@ -68,26 +99,30 @@ fun AdherenceReportScreen(
                 }
 
                 IconButton(
+                    modifier = Modifier.testTag("share_report_button"),
                     onClick = {
-                        val reportText = buildString {
-                            appendLine("--- Rapport d'Observance Médicale MediSnap ---")
-                            appendLine("Date : ${SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE).format(Date())}")
-                            appendLine("Taux global d'observance : $adherencePercent %")
-                            appendLine("Doses prises : $takenCount")
-                            appendLine("Doses manquées/ignorées : $skippedCount")
-                            appendLine("\nHistorique récent :")
-                            allLogs.take(10).forEach { log ->
-                                val statusStr = if (log.status == "TAKEN") "PRIS ✅" else "IGNORÉ ⏭️"
-                                appendLine("- ${log.medicationName} (${log.dosage}) - ${log.timeSlot} : $statusStr")
-                            }
+                        if (requireBiometricForExport &&
+                            BiometricAuthManager.isAvailable(context) &&
+                            activity != null
+                        ) {
+                            onSetAuthenticating(true)
+                            BiometricAuthManager.authenticate(
+                                activity = activity,
+                                title = "Export Rapport Médical",
+                                subtitle = "Confirmez votre identité avant de partager votre rapport",
+                                confirmationRequired = true,
+                                onSuccess = {
+                                    onSetAuthenticating(false)
+                                    launchShareReport()
+                                },
+                                onError = { _, msg ->
+                                    onSetAuthenticating(false)
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                        } else {
+                            launchShareReport()
                         }
-
-                        val sendIntent = Intent().apply {
-                            action = Intent.ACTION_SEND
-                            putExtra(Intent.EXTRA_TEXT, reportText)
-                            type = "text/plain"
-                        }
-                        context.startActivity(Intent.createChooser(sendIntent, "Partager le rapport médical"))
                     }
                 ) {
                     Icon(Icons.Default.Share, contentDescription = "Partager le rapport")

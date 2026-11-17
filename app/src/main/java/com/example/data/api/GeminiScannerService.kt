@@ -1,18 +1,28 @@
 package com.example.data.api
 
 import android.graphics.Bitmap
-import android.util.Base64
-import com.example.BuildConfig
+import android.util.Log
+import com.google.firebase.Firebase
+import com.google.firebase.ai.GenerativeModel
+import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.Schema
+import com.google.firebase.ai.type.content
+import com.google.firebase.ai.type.generationConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-import java.util.concurrent.TimeUnit
+import kotlin.math.max
+import kotlin.math.roundToInt
+
+private const val TAG = "GeminiScannerService"
+
+enum class GeminiModelOption(val modelId: String, val displayLabel: String) {
+    FAST_LITE("gemini-3.5-flash-lite", "3.5 Flash-Lite (Rapide)"),
+    STANDARD("gemini-3.8-flash", "3.8 Flash (Précis)")
+}
 
 data class ScannedMedicationResult(
     val name: String,
@@ -22,174 +32,233 @@ data class ScannedMedicationResult(
     val timesOfDay: String,
     val stockQuantity: Int,
     val colorHex: String,
-    val rawAiAnalysis: String
+    val rawAiAnalysis: String,
+    val activeIngredient: String = "",
+    val isAiVerified: Boolean = false,
+    val isDemoMode: Boolean = false,
+    val errorMessage: String? = null
 )
 
 object GeminiScannerService {
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val medicationSchema = Schema.obj(
+        properties = mapOf(
+            "name" to Schema.string(description = "Nom commercial exact du médicament, ex: Doliprane, Augmentin, Spasfon"),
+            "activeIngredient" to Schema.string(description = "DCI ou principe actif en français, ex: Paracétamol"),
+            "dosage" to Schema.string(description = "Dosage visible sur la boîte ou l'ordonnance, ex: 1000 mg"),
+            "form" to Schema.string(description = "Forme galénique, ex: Comprimé, Gélule, Sachet, Sirop"),
+            "instructions" to Schema.string(description = "Consignes de prise claires en français"),
+            "timesOfDay" to Schema.string(description = "Horaires de prise usuels séparés par des virgules, ex: 08:00,20:00"),
+            "stockQuantity" to Schema.integer(description = "Nombre d'unités dans la boîte si visible, sinon 20"),
+            "colorHex" to Schema.string(description = "Code couleur hex parmi #0F62FE, #10B981, #EF4444, #F59E0B, #8B5CF6")
+        )
+    )
 
-    private fun Bitmap.toBase64(): String {
-        val outputStream = ByteArrayOutputStream()
-        val scaled = Bitmap.createScaledBitmap(this, 800, (800f / width * height).toInt().coerceAtLeast(100), true)
-        scaled.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
-        return Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
+    private val fastLiteModel: GenerativeModel by lazy {
+        buildModel(GeminiModelOption.FAST_LITE.modelId)
+    }
+
+    private val standardModel: GenerativeModel by lazy {
+        buildModel(GeminiModelOption.STANDARD.modelId)
+    }
+
+    private fun buildModel(modelName: String): GenerativeModel {
+        return Firebase.ai.generativeModel(
+            modelName = modelName,
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = medicationSchema
+                temperature = 0.2f
+            },
+            systemInstruction = content {
+                text(
+                    """
+                    Tu es un pharmacien clinicien expert en France.
+                    Analyse l'image d'une boîte de médicament, d'un flacon ou d'une ordonnance (et/ou le texte fourni).
+                    Extrais avec précision les informations médicales en français selon le schéma JSON demandé.
+                    Sois concis et direct.
+                    """.trimIndent()
+                )
+            }
+        )
+    }
+
+    private fun modelFor(option: GeminiModelOption): GenerativeModel = when (option) {
+        GeminiModelOption.FAST_LITE -> fastLiteModel
+        GeminiModelOption.STANDARD -> standardModel
+    }
+
+    private fun Bitmap.scaleForInference(maxDim: Float = 768f): Bitmap {
+        val largest = max(width, height).coerceAtLeast(1)
+        if (largest <= maxDim) return this
+        val scale = maxDim / largest
+        val targetW = (width * scale).roundToInt().coerceAtLeast(1)
+        val targetH = (height * scale).roundToInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(this, targetW, targetH, true)
     }
 
     suspend fun analyzeMedicationImage(
         bitmap: Bitmap?,
-        promptHint: String = ""
+        promptHint: String = "",
+        allowDemoPreset: Boolean = false,
+        modelOption: GeminiModelOption = GeminiModelOption.FAST_LITE
     ): ScannedMedicationResult = withContext(Dispatchers.IO) {
-        val apiKey = try { BuildConfig.GEMINI_API_KEY } catch (e: Exception) { "" }
-
-        if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY") {
-            // Fallback for simulation / mock offline parsing when no live key is set in Secrets
-            return@withContext fallbackParsing(promptHint)
+        if (allowDemoPreset && bitmap == null) {
+            demoPresetResult(promptHint)?.let { return@withContext it }
         }
 
-        try {
-            val systemInstructionText = """
-                Tu es un pharmacien expert IA. Ton rôle est d'analyser l'image d'une boîte de médicament, flacon ou ordonnance (ou texte fourni).
-                Extrais strictement les informations du médicament au format JSON valide.
-                Champs requis :
-                - name: String (Ex: "Doliprane", "Augmentin", "Spasfon")
-                - dosage: String (Ex: "1000 mg", "500 mg/5ml")
-                - form: String (Ex: "Comprimé", "Gélule", "Sirop", "Sachet")
-                - instructions: String (Ex: "1 comprimé pendant le repas avec un grand verre d'eau")
-                - timesOfDay: String (Ex: "08:00,20:00")
-                - stockQuantity: Int (Ex: 30)
-                - colorHex: String (Ex: "#0066FF", "#10B981", "#EF4444", "#F59E0B")
-            """.trimIndent()
+        val scaledBitmap = bitmap?.scaleForInference()
+        val promptText = if (scaledBitmap != null) {
+            "Identifie le médicament sur cette photo et remplis le JSON en français. $promptHint".trim()
+        } else {
+            "Identifie ce médicament et remplis le JSON en français : ${promptHint.ifBlank { "Médicament courant" }}".trim()
+        }
 
-            val partsArray = JSONArray()
-            partsArray.put(JSONObject().put("text", "Analyse ce médicament. $promptHint"))
-
-            if (bitmap != null) {
-                val inlineData = JSONObject()
-                inlineData.put("mimeType", "image/jpeg")
-                inlineData.put("data", bitmap.toBase64())
-                partsArray.put(JSONObject().put("inlineData", inlineData))
+        val inputContent = content {
+            text(promptText)
+            if (scaledBitmap != null) {
+                image(scaledBitmap)
             }
+        }
 
-            val contentsArray = JSONArray()
-            contentsArray.put(JSONObject().put("parts", partsArray))
+        // Try selected model first (streaming reduces latency); if STANDARD times out, retry once on FAST_LITE
+        val candidates = if (modelOption == GeminiModelOption.STANDARD) {
+            listOf(GeminiModelOption.STANDARD, GeminiModelOption.FAST_LITE)
+        } else {
+            listOf(GeminiModelOption.FAST_LITE)
+        }
 
-            val responseSchema = JSONObject().apply {
-                put("type", "OBJECT")
-                val properties = JSONObject().apply {
-                    put("name", JSONObject().put("type", "STRING"))
-                    put("dosage", JSONObject().put("type", "STRING"))
-                    put("form", JSONObject().put("type", "STRING"))
-                    put("instructions", JSONObject().put("type", "STRING"))
-                    put("timesOfDay", JSONObject().put("type", "STRING"))
-                    put("stockQuantity", JSONObject().put("type", "INTEGER"))
-                    put("colorHex", JSONObject().put("type", "STRING"))
+        var lastError: String? = null
+
+        for (candidate in candidates) {
+            try {
+                Log.d(TAG, "Starting Firebase AI stream (${candidate.modelId}), hasImage=${scaledBitmap != null}")
+                val accumulated = StringBuilder()
+
+                withTimeout(90_000L) {
+                    modelFor(candidate).generateContentStream(inputContent).collect { chunk ->
+                        val part = chunk.text.orEmpty()
+                        if (part.isNotEmpty()) {
+                            accumulated.append(part)
+                        }
+                    }
                 }
-                put("properties", properties)
-                put("required", JSONArray(listOf("name", "dosage", "form", "instructions", "timesOfDay", "stockQuantity", "colorHex")))
-            }
 
-            val generationConfig = JSONObject().apply {
-                put("responseMimeType", "application/json")
-                put("responseSchema", responseSchema)
-                put("temperature", 0.2)
-            }
+                val jsonString = accumulated.toString().trim()
+                if (jsonString.isBlank()) {
+                    throw IllegalStateException("Le modèle ${candidate.modelId} n'a renvoyé aucune réponse.")
+                }
 
-            val rootJson = JSONObject().apply {
-                put("contents", contentsArray)
-                put("generationConfig", generationConfig)
-                put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemInstructionText))))
-            }
+                val medJson = JSONObject(jsonString)
+                val parsedName = medJson.optString("name", "").trim()
+                if (parsedName.isBlank()) {
+                    throw IllegalStateException("Aucun nom de médicament n'a pu être extrait.")
+                }
 
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$apiKey"
-            val body = rootJson.toString().toRequestBody("application/json".toMediaType())
-
-            val request = Request.Builder()
-                .url(url)
-                .post(body)
-                .build()
-
-            val response = client.newCall(request).execute()
-            val responseStr = response.body?.string() ?: ""
-
-            if (!response.isSuccessful || responseStr.isBlank()) {
-                return@withContext fallbackParsing(promptHint)
-            }
-
-            val responseObj = JSONObject(responseStr)
-            val candidates = responseObj.optJSONArray("candidates")
-            val firstCandidate = candidates?.optJSONObject(0)
-            val content = firstCandidate?.optJSONObject("content")
-            val parts = content?.optJSONArray("parts")
-            val rawText = parts?.optJSONObject(0)?.optString("text") ?: ""
-
-            if (rawText.isNotBlank()) {
-                val medJson = JSONObject(rawText)
                 return@withContext ScannedMedicationResult(
-                    name = medJson.optString("name", "Médicament Détecté"),
-                    dosage = medJson.optString("dosage", "500 mg"),
-                    form = medJson.optString("form", "Comprimé"),
-                    instructions = medJson.optString("instructions", "Prendre avec un verre d'eau"),
-                    timesOfDay = medJson.optString("timesOfDay", "08:00,20:00"),
-                    stockQuantity = medJson.optInt("stockQuantity", 30),
-                    colorHex = medJson.optString("colorHex", "#0066FF"),
-                    rawAiAnalysis = "Analyse Gemini 3.5 Flash réussie !"
+                    name = parsedName,
+                    dosage = medJson.optString("dosage", "Non précisé").trim(),
+                    form = medJson.optString("form", "Comprimé").trim(),
+                    instructions = medJson.optString(
+                        "instructions",
+                        "Prendre selon la prescription médicale"
+                    ).trim(),
+                    timesOfDay = medJson.optString("timesOfDay", "08:00,20:00").trim(),
+                    stockQuantity = medJson.optInt("stockQuantity", 20).coerceAtLeast(1),
+                    colorHex = medJson.optString("colorHex", "#0F62FE").trim(),
+                    rawAiAnalysis = "Analyse réussie avec ${candidate.displayLabel}",
+                    activeIngredient = medJson.optString("activeIngredient", "").trim(),
+                    isAiVerified = true,
+                    isDemoMode = false,
+                    errorMessage = null
                 )
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "Firebase AI generation timed out on ${candidate.modelId}", e)
+                lastError = "Délai d'attente dépassé (90 s) sur ${candidate.modelId}. Vérifiez la connexion réseau de l'émulateur."
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Firebase AI generation failed on ${candidate.modelId}", e)
+                val detail = e.localizedMessage ?: "Erreur inconnue"
+                lastError = "Erreur Firebase AI (${candidate.modelId}) : $detail"
             }
-
-            fallbackParsing(promptHint)
-        } catch (e: Exception) {
-            fallbackParsing(promptHint, e.localizedMessage ?: "Erreur réseau AI")
         }
+
+        errorResult(lastError ?: "Erreur d'analyse Firebase AI.")
     }
 
-    private fun fallbackParsing(promptHint: String, errorMsg: String? = null): ScannedMedicationResult {
+    private fun errorResult(diagnostic: String): ScannedMedicationResult =
+        ScannedMedicationResult(
+            name = "",
+            dosage = "",
+            form = "Comprimé",
+            instructions = "",
+            timesOfDay = "08:00,20:00",
+            stockQuantity = 30,
+            colorHex = "#0F62FE",
+            rawAiAnalysis = diagnostic,
+            activeIngredient = "",
+            isAiVerified = false,
+            isDemoMode = false,
+            errorMessage = diagnostic
+        )
+
+    private fun demoPresetResult(promptHint: String): ScannedMedicationResult? {
         val lower = promptHint.lowercase()
         return when {
             lower.contains("doliprane") || lower.contains("paracetamol") -> ScannedMedicationResult(
                 name = "Doliprane",
                 dosage = "1000 mg",
                 form = "Comprimé",
-                instructions = "1 comprimé toutes me 6h en cas de douleur ou fièvre",
+                instructions = "1 comprimé toutes les 6 h en cas de douleur ou fièvre (max 3 g/jour sans avis médical)",
                 timesOfDay = "08:00,14:00,20:00",
-                stockQuantity = 24,
+                stockQuantity = 8,
                 colorHex = "#0066FF",
-                rawAiAnalysis = "Détection IA (Mode démonstration - Doliprane 1000mg)"
+                rawAiAnalysis = "Fiche de démonstration — Doliprane 1000 mg",
+                activeIngredient = "Paracétamol",
+                isAiVerified = false,
+                isDemoMode = true
             )
             lower.contains("amoxicilline") || lower.contains("antibiotique") -> ScannedMedicationResult(
                 name = "Amoxicilline",
                 dosage = "500 mg",
                 form = "Gélule",
-                instructions = "1 gélule au début des repas",
+                instructions = "1 gélule au début des repas jusqu'à la fin de la durée prescrite",
                 timesOfDay = "08:00,13:00,20:00",
-                stockQuantity = 21,
+                stockQuantity = 12,
                 colorHex = "#10B981",
-                rawAiAnalysis = "Détection IA (Mode démonstration - Amoxicilline 500mg)"
+                rawAiAnalysis = "Fiche de démonstration — Amoxicilline 500 mg",
+                activeIngredient = "Amoxicilline",
+                isAiVerified = false,
+                isDemoMode = true
             )
             lower.contains("spasfon") -> ScannedMedicationResult(
                 name = "Spasfon",
                 dosage = "80 mg",
                 form = "Comprimé",
-                instructions = "2 comprimés au moment des spasmes",
+                instructions = "2 comprimés au moment des spasmes douloureux",
                 timesOfDay = "08:00,13:00,20:00",
                 stockQuantity = 30,
                 colorHex = "#F59E0B",
-                rawAiAnalysis = "Détection IA (Mode démonstration - Spasfon 80mg)"
+                rawAiAnalysis = "Fiche de démonstration — Spasfon 80 mg",
+                activeIngredient = "Phloroglucinol",
+                isAiVerified = false,
+                isDemoMode = true
             )
-            else -> ScannedMedicationResult(
-                name = if (promptHint.isNotBlank()) promptHint.capitalize() else "Augmentin",
-                dosage = "1g / 125mg",
+            lower.contains("augmentin") -> ScannedMedicationResult(
+                name = "Augmentin",
+                dosage = "1 g / 125 mg",
                 form = "Sachet",
-                instructions = "Pendant le repas, dissoudre dans l'eau",
+                instructions = "Dissoudre dans un verre d'eau au début du repas",
                 timesOfDay = "08:00,20:00",
                 stockQuantity = 16,
                 colorHex = "#8B5CF6",
-                rawAiAnalysis = if (errorMsg != null) "Mode IA local ($errorMsg)" else "Analyse IA terminée avec succès"
+                rawAiAnalysis = "Fiche de démonstration — Augmentin 1 g / 125 mg",
+                activeIngredient = "Amoxicilline / Acide clavulanique",
+                isAiVerified = false,
+                isDemoMode = true
             )
+            else -> null
         }
     }
 }

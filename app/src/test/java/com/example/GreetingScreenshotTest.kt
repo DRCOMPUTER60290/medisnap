@@ -1,10 +1,12 @@
 package com.example
 
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import com.example.ui.screens.BiometricLockScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.github.takahirom.roborazzi.RobolectricDeviceQualifiers
-import com.github.takahirom.roborazzi.captureRoboImage
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -20,9 +22,22 @@ class GreetingScreenshotTest {
   @get:Rule val composeTestRule = createComposeRule()
 
   @Test
-  fun greeting_screenshot() {
-    composeTestRule.setContent { MyApplicationTheme { Greeting("Robolectric") } }
+  fun biometric_lock_screen_displays_french_rgpd_protection() {
+    composeTestRule.setContent {
+      MyApplicationTheme {
+        BiometricLockScreen(
+          isBiometricAvailable = true,
+          statusDescription = "Biométrie et code de verrouillage prêts",
+          errorMessage = null,
+          isAuthenticating = false,
+          onTriggerBiometric = {},
+          onOpenSecuritySettings = {},
+          onContinueUnconfigured = {}
+        )
+      }
+    }
 
-    composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/greeting.png")
+    composeTestRule.onNodeWithText("Dossier Médical Protégé").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("biometric_unlock_button").assertIsDisplayed()
   }
 }
